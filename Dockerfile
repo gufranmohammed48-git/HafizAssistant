@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python deps (cached separately from app code for faster rebuilds)
-# Cython + build tools must come BEFORE nemo_toolkit because youtokentome
+# Cython + build tools MUST come BEFORE nemo_toolkit (youtokentome needs Cython) because youtokentome
 # (NeMo dep) needs to compile from source on Python 3.10.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir cython setuptools wheel && \
-    PIP_NO_BUILD_ISOLATION=1 pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
 # Copy app code
 COPY app.py .
