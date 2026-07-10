@@ -18,7 +18,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir cython setuptools wheel && \
-    pip install --no-cache-dir --no-build-isolation -r requirements.txt
+    pip install --no-cache-dir --no-build-isolation -r requirements.txt && \
+    pip install --no-cache-dir --force-reinstall --no-deps 'pyarrow<14'
 
 # Copy app code
 COPY app.py .
