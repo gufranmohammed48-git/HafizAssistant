@@ -19,7 +19,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir cython setuptools wheel && \
     pip install --no-cache-dir --no-build-isolation -r requirements.txt && \
-    pip install --no-cache-dir --force-reinstall --no-deps 'pyarrow<14'
+    pip uninstall -y pyarrow && \
+    pip install --no-cache-dir 'pyarrow==13.0.0'
 
 # Copy app code
 COPY app.py .
