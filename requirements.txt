@@ -1,0 +1,7 @@
+nemo_toolkit[asr]==1.22.0
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+numpy==1.26.4
+scipy==1.13.0
+websockets==12.0
+huggingface_hub==0.23.0
