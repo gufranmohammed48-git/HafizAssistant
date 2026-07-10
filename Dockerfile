@@ -15,7 +15,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir cython setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+    PIP_NO_BUILD_ISOLATION=1 pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY app.py .
