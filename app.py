@@ -84,6 +84,7 @@ class StreamingSession:
         # For RNN-T streaming we feed pre-encoded chunks
         self.sample_offset = 0
         self.last_result_text = ""
+        self.chunk_count = 0
 
     async def process_chunk(self, audio_int16: np.ndarray):
         """Take raw PCM int16 audio, run streaming inference, send word events."""
@@ -99,6 +100,7 @@ class StreamingSession:
             self.sample_offset += shift
         self.buffer[self.buffer_len:self.buffer_len + len(audio)] = audio
         self.buffer_len += len(audio)
+        self.chunk_count += 1
 
         # Only transcribe the LAST 2 seconds (most recent audio) to keep latency low
         # and avoid transcribing all the silence before speech started.
@@ -116,6 +118,16 @@ class StreamingSession:
             import tempfile, soundfile as sf
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             sf.write(tmp.name, audio_active, SAMPLE_RATE)
+            # DEBUG: save named copy AFTER writing (for inspecting what model is getting)
+            try:
+                import shutil
+                debug_path = f"/tmp/debug_chunks/chunk_{self.chunk_count:04d}.wav"
+                os.makedirs("/tmp/debug_chunks", exist_ok=True)
+                shutil.copy(tmp.name, debug_path)
+                if self.chunk_count < 5 or self.chunk_count % 10 == 0:
+                    log.info(f"DEBUG_SAVED: {debug_path} audio_len={len(audio_active)}")
+            except Exception as e:
+                log.warning(f"DEBUG_SAVE_FAILED: {e}")
             hyp = asr_model.transcribe(
                 [tmp.name],
                 return_hypotheses=True,
@@ -222,6 +234,28 @@ async def root():
 @app.get("/healthz")
 async def healthz():
     return JSONResponse({"status": "ok", "model": "fastconformer-quran-ar"})
+
+
+@app.get("/api/debug-audio")
+async def debug_audio():
+    """Return all saved debug chunks as a zip (for inspecting what the model is getting)."""
+    import zipfile, io
+    from fastapi.responses import StreamingResponse
+    if not os.path.isdir("/tmp/debug_chunks"):
+        return JSONResponse({"error": "no chunks saved yet"}, status_code=404)
+    files = sorted([f for f in os.listdir("/tmp/debug_chunks") if f.endswith(".wav")])
+    if not files:
+        return JSONResponse({"error": "debug dir is empty"}, status_code=404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(os.path.join("/tmp/debug_chunks", f), f)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=debug_chunks.zip"},
+    )
 
 
 @app.websocket("/ws")
