@@ -19,6 +19,35 @@ import nemo.collections.asr as nemo_asr
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("fastconformer-quran")
 
+# Monkey-patch json.dumps to handle numpy types globally. NeMo's transcribe() internally
+# writes a manifest file with float32 timestamps and crashes without this.
+_orig_json_dumps = json.dumps
+def _safe_dumps(obj, **kwargs):
+    kwargs.setdefault('cls', NumpyJSONEncoder)
+    return _orig_json_dumps(obj, **kwargs)
+json.dumps = _safe_dumps
+
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Handle numpy types that the default JSON encoder rejects."""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (np.str_,)):
+            return str(obj)
+        return super().default(obj)
+
+
+async def _safe_send_json(ws, data):
+    """Send JSON via WebSocket, with numpy type coercion."""
+    return await ws.send_text(json.dumps(data, cls=NumpyJSONEncoder, ensure_ascii=False))
+
 app = FastAPI(title="FastConformer Quran ASR")
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +63,7 @@ MODEL_PATH = os.environ.get(
 )
 
 log.info(f"Loading FastConformer model from {MODEL_PATH} ...")
-asr_model = nemo_asr.models.EncDecHybridRNNTCTCBPE_Model.restore_from(MODEL_PATH, map_location="cpu")
+asr_model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(MODEL_PATH, map_location="cpu")
 asr_model.eval()
 # Caching for streaming (cache-aware local attention)
 asr_model.change_attention_model("rel_pos_local_attn", [256, 256])
@@ -71,18 +100,30 @@ class StreamingSession:
         self.buffer[self.buffer_len:self.buffer_len + len(audio)] = audio
         self.buffer_len += len(audio)
 
-        # Transcribe using NeMo's transcribe (offline on each chunk for simplicity)
+        # Only transcribe the LAST 2 seconds (most recent audio) to keep latency low
+        # and avoid transcribing all the silence before speech started.
+        last_two_sec = SAMPLE_RATE * 2
+        start = max(0, self.buffer_len - last_two_sec)
+        log.info(f"process_chunk: buffer_len={self.buffer_len}, using last {len(audio_int16) if False else (self.buffer_len-start)} samples")
         # For TRUE streaming we'd use the RNN-T greedy decoder with cache, but the
         # easier path is: each chunk is the rolling buffer, get full hypothesis,
         # diff against committed_text to extract new words.
         try:
-            # Slice the active audio
-            audio_active = self.buffer[:self.buffer_len].copy()
-            # Use NeMo's transcribe on a numpy array — returns (text, ...)
+            # Slice the active audio (last 2 seconds)
+            audio_active = self.buffer[start:self.buffer_len].copy()
+            # NeMo's hybrid FastConformer transcribe() only accepts a list of file
+            # paths. Write the audio to a temp WAV and pass that.
+            import tempfile, soundfile as sf
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            sf.write(tmp.name, audio_active, SAMPLE_RATE)
             hyp = asr_model.transcribe(
-                audio_active,
+                [tmp.name],
                 return_hypotheses=True,
             )
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
             if isinstance(hyp, tuple):
                 hyp = hyp[0]
             if isinstance(hyp, list):
@@ -108,15 +149,18 @@ class StreamingSession:
                 new_text = text[common:].lstrip()
             if new_text:
                 # Send partial word(s) as a JSON message
-                await self.websocket.send_json({
+                log.info(f"PARTIAL: {text!r} (new: {new_text!r})")
+                await _safe_send_json(self.websocket, {
                     "type": "partial",
                     "text": new_text,
                     "full_text": text,
                 })
                 self.last_result_text = text
+            else:
+                log.info(f"NO_NEW_TEXT: full={text!r}")
         except Exception as e:
             log.exception(f"Streaming error: {e}")
-            await self.websocket.send_json({
+            await _safe_send_json(self.websocket, {
                 "type": "error",
                 "message": str(e),
             })
@@ -124,7 +168,7 @@ class StreamingSession:
     async def commit(self):
         """Mark current text as committed."""
         self.committed_text = self.last_result_text
-        await self.websocket.send_json({
+        await _safe_send_json(self.websocket, {
             "type": "committed",
             "text": self.committed_text,
         })
@@ -135,7 +179,12 @@ class StreamingSession:
             audio_active = self.buffer[:self.buffer_len].copy()
             if len(audio_active) < SAMPLE_RATE * 0.3:  # < 300ms, skip
                 return
-            hyp = asr_model.transcribe(audio_active, return_hypotheses=True)
+            import tempfile, soundfile as sf
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            sf.write(tmp.name, audio_active, SAMPLE_RATE)
+            hyp = asr_model.transcribe([tmp.name], return_hypotheses=True)
+            try: os.unlink(tmp.name)
+            except Exception: pass
             if isinstance(hyp, tuple):
                 hyp = hyp[0]
             if isinstance(hyp, list):
@@ -143,14 +192,22 @@ class StreamingSession:
             if hyp is None:
                 return
             text = (hyp.text or "").strip()
-            # Try to get word-level timestamps
+            # Try to get word-level timestamps (coerce numpy types to native Python)
             words = []
             if hasattr(hyp, "timestamp") and hyp.timestamp:
-                words = [{"word": w, "start": s, "end": e}
-                         for w, s, e in hyp.timestamp.get("word", [])]
-            await self.websocket.send_json({
+                def _coerce(v):
+                    # numpy float32/float64/int64 → Python float/int
+                    if hasattr(v, "item"):
+                        try: return v.item()
+                        except Exception: return float(v)
+                    return v
+                for w, s, e in hyp.timestamp.get("word", []):
+                    words.append({"word": _coerce(w), "start": _coerce(s), "end": _coerce(e)})
+            # Also coerce text in case the model returns a numpy string
+            text_str = str(text) if text is not None else ""
+            await _safe_send_json(self.websocket, {
                 "type": "final",
-                "text": text,
+                "text": text_str,
                 "words": words,
             })
         except Exception as e:
@@ -195,7 +252,7 @@ async def ws_transcribe(websocket: WebSocket):
                         session.sample_offset = 0
                         session.committed_text = ""
                         session.last_result_text = ""
-                        await websocket.send_json({"type": "reset"})
+                        await _safe_send_json(websocket, {"type": "reset"})
                 except json.JSONDecodeError:
                     log.warning(f"Bad JSON: {msg['text']}")
     except WebSocketDisconnect:
