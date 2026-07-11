@@ -238,23 +238,30 @@ async def healthz():
 
 @app.get("/api/debug-audio")
 async def debug_audio():
-    """Return all saved debug chunks as a zip (for inspecting what the model is getting)."""
-    import zipfile, io
+    """Return the LAST 10 saved debug chunks as a zip. ~640KB max."""
+    import re, zipfile, io
     from fastapi.responses import StreamingResponse
     if not os.path.isdir("/tmp/debug_chunks"):
         return JSONResponse({"error": "no chunks saved yet"}, status_code=404)
-    files = sorted([f for f in os.listdir("/tmp/debug_chunks") if f.endswith(".wav")])
+    # CRITICAL: sort by NUMERIC chunk number, not alphabetically!
+    # "chunk_0001" < "chunk_0010" lexically, but 1 < 10 numerically.
+    # Default lex sort gave chunk_0136..0145 (oldest) instead of chunk_0001..0010 (newest).
+    files = sorted(
+        [f for f in os.listdir("/tmp/debug_chunks") if f.endswith(".wav")],
+        key=lambda f: int(re.search(r"chunk_(\d+)", f).group(1))
+    )
     if not files:
         return JSONResponse({"error": "debug dir is empty"}, status_code=404)
+    files = files[-10:]  # last 10 only
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_STORED) as zf:
         for f in files:
             zf.write(os.path.join("/tmp/debug_chunks", f), f)
     buf.seek(0)
     return StreamingResponse(
         buf,
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=debug_chunks.zip"},
+        headers={"Content-Disposition": f"attachment; filename=debug_last_{len(files)}.zip"},
     )
 
 
