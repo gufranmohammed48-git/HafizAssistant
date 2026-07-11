@@ -265,6 +265,107 @@ async def debug_audio():
     )
 
 
+
+class WhisperSession:
+    """Accumulates 3s of audio and transcribes with Whisper (handles all Arabic voices)."""
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.audio_buffer = []  # list of int16 arrays
+        self.total_samples = 0
+        self.sample_rate = 16000
+        self.min_chunk_samples = self.sample_rate * 3  # 3 seconds minimum
+        self.transcribe_count = 0
+
+    async def process_chunk(self, audio_int16: np.ndarray):
+        self.audio_buffer.append(audio_int16.copy())
+        self.total_samples += len(audio_int16)
+        # Once we have 3s, transcribe and reset
+        if self.total_samples >= self.min_chunk_samples:
+            await self._transcribe_buffer()
+
+    async def _transcribe_buffer(self):
+        if not self.audio_buffer:
+            return
+        # Concatenate all chunks
+        full_audio = np.concatenate(self.audio_buffer)
+        # Convert to float32 normalized
+        audio_float = full_audio.astype(np.float32) / 32768.0
+        self.audio_buffer = []
+        self.total_samples = 0
+        self.transcribe_count += 1
+
+        try:
+            # Send "transcribing" status
+            await _safe_send_json(self.websocket, {
+                "type": "transcribing",
+                "buffer_seconds": len(audio_float) / self.sample_rate,
+            })
+            # Run whisper in thread pool to not block
+            import whisper_transcribe
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(
+                None, whisper_transcribe.transcribe_audio, audio_float, self.sample_rate
+            )
+            if text and text.strip():
+                log.info(f"WHISPER_RESPONSE #{self.transcribe_count}: {text!r}")
+                await _safe_send_json(self.websocket, {
+                    "type": "partial",
+                    "text": text,
+                    "full_text": text,
+                    "model": "whisper",
+                })
+            else:
+                log.info(f"WHISPER_EMPTY #{self.transcribe_count}")
+                await _safe_send_json(self.websocket, {
+                    "type": "empty",
+                    "model": "whisper",
+                })
+        except Exception as e:
+            log.exception(f"Whisper error: {e}")
+            await _safe_send_json(self.websocket, {"type": "error", "message": str(e)})
+
+    async def finalize(self):
+        # Transcribe any remaining audio
+        if self.total_samples > 0:
+            await self._transcribe_buffer()
+
+
+@app.websocket("/ws/whisper")
+async def ws_whisper(websocket: WebSocket):
+    """Whisper-based transcription (handles all Arabic reciters, slower than FastConformer)."""
+    await websocket.accept()
+    # Warm up the model on first connection
+    import whisper_transcribe
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, whisper_transcribe.warmup)
+    except Exception as e:
+        log.warning(f"Whisper warmup failed: {e}")
+    session = WhisperSession(websocket)
+    log.info("Whisper WebSocket connected")
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            if "bytes" in msg:
+                raw = msg["bytes"]
+                audio = np.frombuffer(raw, dtype=np.int16)
+                await session.process_chunk(audio)
+            elif "text" in msg:
+                try:
+                    data = json.loads(msg["text"])
+                    if data.get("type") == "finalize":
+                        await session.finalize()
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await session.finalize()
+        log.info("Whisper WebSocket closed")
+
+
 @app.websocket("/ws")
 async def ws_transcribe(websocket: WebSocket):
     await websocket.accept()
