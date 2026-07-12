@@ -106,7 +106,7 @@ class StreamingSession:
 
         # Only transcribe the LAST 2 seconds (most recent audio) to keep latency low
         # and avoid transcribing all the silence before speech started.
-        last_two_sec = SAMPLE_RATE * 1  # reduced from 2s for lower latency
+        last_two_sec = SAMPLE_RATE * 2  # 2s rolling window — model needs 2s+ context to recognize Quran reliably
         start = max(0, self.buffer_len - last_two_sec)
         log.info(f"process_chunk: buffer_len={self.buffer_len}, using last {len(audio_int16) if False else (self.buffer_len-start)} samples")
         # For TRUE streaming we'd use the RNN-T greedy decoder with cache, but the
