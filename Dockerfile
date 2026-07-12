@@ -23,16 +23,25 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir 'pyarrow==13.0.0'
 
 # Copy app code
-COPY app.py .
+COPY app.py ./
+COPY whisper_transcribe.py ./
 
-# Download the FastConformer model at build time (cached in image)
-RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='mohammed/fastconformer-quran-ar', filename='phase3_full_finetune/phase3_full_finetune_wer0.1432.nemo', local_dir='/data')"
+# Download the FastConformer model at build time (cached in image).
+# Production model: shahabazkc10/fastconformer-quran-bucket (4.13% WER,
+# 0.93% on held-out unseen reciters, supports full Arabic voice diversity
+# with diacritics). Replaces the older mohammed/fastconformer-quran-ar
+# which was biased to Alafasy's voice.
+# Override at runtime with MODEL_PATH env var.
+ARG MODEL_REPO=shahabazkc10/fastconformer-quran-bucket
+ARG MODEL_FILENAME=fastconformer-quran.nemo
+RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='${MODEL_REPO}', filename='${MODEL_FILENAME}', local_dir='/data')"
 
-# Set the model path
-ENV MODEL_PATH=/data/phase3_full_finetune/phase3_full_finetune_wer0.1432.nemo
-ENV PYTHONUNBUFFERED=1
+# Default model path (can be overridden by MODEL_PATH env var at runtime)
+ENV MODEL_PATH=/data/fastconformer-quran.nemo \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080
 
 EXPOSE 8080
 
-# Railway sets $PORT. Default to 8080 if not set.
+# Use shell form to expand $PORT (works for both Railway and docker-compose)
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --log-level info"]

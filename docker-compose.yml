@@ -1,0 +1,57 @@
+# docker-compose.yml — local dev + production deploy for the FastConformer backend.
+#
+# Usage:
+#   docker compose up --build          # build image + start service
+#   docker compose up -d               # start in background
+#   docker compose logs -f fastconformer
+#   docker compose down                # stop
+#
+# The model is downloaded into a named volume at first build so subsequent
+# restarts don't re-download (459MB). Model path can be overridden via
+# MODEL_PATH env var if you mount a different model file.
+#
+# Notes:
+# - The image bakes in the model at build time too (Dockerfile), so the
+#   volume just caches a copy for hot-reload.
+# - We expose 8080 internally; front it with nginx on the host for HTTPS/WSS.
+
+version: "3.9"
+
+services:
+  fastconformer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Build args let you swap the model without editing the Dockerfile.
+      # Defaults match the production model shahabazkc10/fastconformer-quran-bucket.
+      args:
+        MODEL_REPO: shahabazkc10/fastconformer-quran-bucket
+        MODEL_FILENAME: fastconformer-quran.nemo
+    image: fastconformer-quran:latest
+    container_name: fastconformer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # bind to localhost only; nginx fronts this
+    environment:
+      - MODEL_PATH=/data/fastconformer-quran.nemo
+      - PYTHONUNBUFFERED=1
+      - PORT=8080
+    volumes:
+      - model_data:/data        # persist model + debug chunks across rebuilds
+      - ./static:/opt/quran/web:ro   # mount frontend HTML files (optional)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s   # model load takes ~30s on first boot
+    # Resource limits — drop these for a smaller droplet
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "1.5"
+
+volumes:
+  model_data:
+    name: fastconformer_model

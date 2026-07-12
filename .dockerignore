@@ -1,0 +1,51 @@
+# .dockerignore — keeps the Docker build context small and the image clean.
+# Anything in this file is NOT sent to the Docker daemon at build time.
+
+# Git / version control
+.git
+.gitignore
+.gitattributes
+
+# CI / CD
+.github
+.gitlab-ci.yml
+.circleci
+
+# Python caches / venvs (Dockerfile installs from requirements.txt, not the venv)
+__pycache__
+*.py[cod]
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Tests + dev artifacts
+tests/
+test/
+*.test.py
+htmlcov/
+.coverage
+.coverage.*
+
+# Local config / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Docs / READMEs (kept in repo, not in image)
+# README.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime / debug
+debug_chunks/
+*.wav
+*.ogg
+*.mp3
+*.log
+logs/
